@@ -1,7 +1,7 @@
 version: '3.8'
 services:
   app:
-    image: app:${currentBuild.number}
+    image: app:dev
     ports:
       - "5001:5000"
     environment:
