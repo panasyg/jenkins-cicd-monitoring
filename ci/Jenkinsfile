@@ -2,47 +2,72 @@ pipeline {
     agent any
 
     environment {
-        IMAGE_NAME = "v${currentBuild.number}"
+        GIT_BRANCH = 'main'
+        IMAGE_NAME = "app"
+        DEV_TAG = "dev"
+        PROD_TAG = "latest"
     }
 
     stages {
         stage('Checkout') {
             steps {
-                git 'https://github.com/panasyg/jenkins-cicd-monitoring.git'
+                git branch: "${GIT_BRANCH}", url: 'https://github.com/panasyg/jenkins-cicd-monitoring.git'
             }
         }
 
         stage('Build Docker Image') {
             steps {
                 script {
-                    sh "docker build -t ${IMAGE_NAME} ."
+                    dir('app') {
+
+                        docker.build("${IMAGE_NAME}:${DEV_TAG}", '.')
+                        
+                        sh "docker tag ${IMAGE_NAME}:${DEV_TAG} ${IMAGE_NAME}:${PROD_TAG}"
+                    }
                 }
             }
         }
 
-        stage('Run Docker Container') {
+        stage('Run Test Container') {
             steps {
                 script {
-                    sh "docker-compose up -d"
+                    dir('app') {
+                        sh "docker compose -f docker-compose.dev.yml up -d"
+                    }
                 }
             }
         }
 
-        stage('Test Application') {
+        stage('Test') {
             steps {
                 script {
-                    sh """
-                    sleep 5 
-                    curl --fail http://localhost:5000/health || exit 1
-                    """
+                    sleep 2
+
+                    def response = sh(script: "curl --fail http://localhost:5001/health", returnStatus: true)
+
+                    if (response != 0) {
+                        echo "Test failed"
+                        currentBuild.result = 'FAILURE'
+                    } else {
+                        echo "Test passed"
+                        dir('app'){
+                            sh "docker compose -f docker-compose.dev.yml down"
+                            sh "docker rmi ${IMAGE_NAME}:${DEV_TAG}"
+                        }
+                    }
                 }
             }
         }
 
-        stage('Cleanup') {
+        stage('Deploy to Production') {
+            when {
+                expression { currentBuild.result == null || currentBuild.result == 'SUCCESS' }
+            }
             steps {
                 script {
-                    sh "docker-compose down"
+                    dir('app') {
+                        sh "docker compose -f docker-compose.prod.yml up -d --no-deps app"
+                    }
                 }
             }
         }
@@ -50,13 +75,24 @@ pipeline {
 
     post {
         always {
-            sh "docker ps -a"
+            script {
+                echo "Stopping and cleaning up test container..."
+                dir('app') {
+                    sh "docker compose -f docker-compose.dev.yml down"
+                }
+                sh "docker ps -a"
+            }
         }
-        success {
-            echo "Successfull pipeline execution"
-        }
+
         failure {
-            echo "Pipeline has failed"
+            script {
+                echo "Test failed - removing test image..."
+                sh 'docker images -q -f dangling=true | xargs --no-run-if-empty docker rmi'
+            }
+        }
+
+        success {
+            echo "Successful deployment"
         }
     }
 }
